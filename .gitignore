@@ -1,0 +1,23 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.idea/
+.vscode/
+
+# --- 데이터 / 산출물 (사용자가 직접 채워 넣음) ---
+repository/
+results/
+data/
+*.fits
+*.csv
+
+# --- Legacy / out-of-scope 코드 (process2 까지만 공유) ---
+process3_iod.py
+process4_od.py
+rebuild_passed_all.py
+analyze/
+batch_least_square_estimation/
+initial_orbit_determination/
+classes/read_files.py
