@@ -60,27 +60,35 @@
 
 ## 설치
 
+Python 3.9+ 권장. 의존성: `numpy`, `pandas`, `astropy`, `sgp4`
+
+방법 A — 명령어 설치 (권장, OS 무관):
+```bash
+pip install -e .
+```
+→ `ftp2str`, `str2tle`, `ssa` 명령이 등록되어 어느 폴더에서든 바로 쓸 수 있다.
+
+방법 B — 의존성만 설치하고 스크립트를 경로로 실행:
 ```bash
 pip install -r requirements.txt
 ```
 
-Python 3.9+ 권장. 의존성: `numpy`, `pandas`, `astropy`, `sgp4`
-
 ## 사용법
 
-자료 폴더로 이동한 뒤 실행한다. 코드는 어디에 두어도 무방하다(예: `C:\tools\SSA`).
+자료 폴더로 이동한 뒤 실행한다. 코드는 어디에 두어도 무방하다.
 
 ```bash
 cd /data/case01     # ftp.txt 등이 있는 폴더
 
-# 단계별 (각 스크립트 단독 실행)
+# 방법 A (pip install -e . 한 경우) — 어디서든
+ftp2str
+str2tle
+ssa run             # ftp2str + str2tle
+
+# 방법 B (스크립트를 경로로)
 python /path/to/ftp2str.py
 python /path/to/str2tle.py
-
-# 또는 main.py 로
-python /path/to/main.py ftp2str
-python /path/to/main.py str2tle
-python /path/to/main.py run        # ftp2str + str2tle (str.txt 를 바로 매칭)
+python /path/to/main.py run
 python /path/to/main.py            # 인자 없이 대화형
 ```
 
