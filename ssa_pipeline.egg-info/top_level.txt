@@ -1,6 +1,0 @@
-candidate_search
-evaluate
-ftp2str
-main
-motion
-str2tle

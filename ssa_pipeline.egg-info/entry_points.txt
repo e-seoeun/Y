@@ -1,4 +1,0 @@
-[console_scripts]
-ftp2str = ftp2str:run
-ssa = main:main
-str2tle = str2tle:run

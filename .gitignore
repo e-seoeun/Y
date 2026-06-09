@@ -22,3 +22,6 @@ rebuild_passed_all.py
 analyze/
 batch_least_square_estimation/
 initial_orbit_determination/
+*.egg-info/
+build/
+dist/
