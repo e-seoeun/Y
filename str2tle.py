@@ -33,6 +33,7 @@ from __future__ import annotations
 import math
 import multiprocessing as mp
 import os
+import re
 import sys
 import time as wall_time
 from datetime import datetime
@@ -136,28 +137,58 @@ def resolve_site(folder: Path) -> Path:
 
 
 # =============================================================================
-# catalog 파일 자동 감지 ('catalog.txt' 또는 '*catalog.txt')
+# catalog(TLE) 파일 자동 감지
 # =============================================================================
+def _date_in_path(folder: Path):
+    """경로 구성요소에서 YYYYMMDD 를 찾는다 (예: .../20260501/GoHeung → '20260501')."""
+    for part in [folder.name] + [p.name for p in folder.parents]:
+        if re.fullmatch(r"\d{8}", part):
+            return part
+    return None
+
+
+def _nearby_tle_dir(folder: Path):
+    """현재 폴더에서 위로 올라가며 'TLE' 디렉토리를 찾는다 (예: YSPACE/TLE)."""
+    for base in [folder, *folder.parents]:
+        cand = base / "TLE"
+        if cand.is_dir():
+            return cand
+    return None
+
+
 def resolve_catalog(folder: Path) -> Path:
     """
-    catalog 파일을 결정한다.
-      1) catalog.txt 가 있으면 → 그것
-      2) 없으면 → '*catalog.txt' 로 끝나는 파일 (예: 20250517_0002_catalog.txt)
-                  여러 개면 이름 정렬상 첫 번째를 쓰고 안내한다.
-      3) 하나도 없으면 → FileNotFoundError
+    catalog(TLE) 파일을 결정한다.
+      1) 현재 폴더의 catalog.txt 가 있으면 → 그것
+      2) 현재 폴더의 '*catalog.txt' 가 있으면 → 그것 (여러 개면 정렬상 첫 번째)
+      3) 위 둘 다 없으면 → 상위에서 'TLE' 폴더를 찾아, 그 폴더 경로의 날짜(YYYYMMDD)에
+         해당하는 'YYYYMMDD_*_catalog.txt' 중 가장 이른 시간(이름순 첫 번째)을 쓴다.
+         (예: YSPACE/YYYYMMDD/site 에서 실행 → YSPACE/TLE 의 그날 가장 이른 catalog)
+      4) 그래도 없으면 → FileNotFoundError
     """
     if CATALOG_FILE.exists():
         return CATALOG_FILE
+
     matches = sorted(p for p in folder.glob("*catalog.txt") if p.is_file())
-    if not matches:
-        raise FileNotFoundError(
-            f"catalog 파일이 현재 폴더에 없습니다: '{CATALOG_FILE.name}' "
-            f"또는 '*catalog.txt' ({folder})"
-        )
-    if len(matches) > 1:
-        print(f"  [주의] catalog 후보 {len(matches)}개 중 '{matches[0].name}' 사용 "
-              f"(전체: {', '.join(p.name for p in matches)})")
-    return matches[0]
+    if matches:
+        if len(matches) > 1:
+            print(f"  [주의] catalog 후보 {len(matches)}개 중 '{matches[0].name}' 사용 "
+                  f"(전체: {', '.join(p.name for p in matches)})")
+        return matches[0]
+
+    # 폴백: 인근 TLE 폴더에서 그날 가장 이른 catalog
+    tle_dir = _nearby_tle_dir(folder)
+    date = _date_in_path(folder)
+    if tle_dir is not None and date is not None:
+        day = sorted(tle_dir.glob(f"{date}_*_catalog.txt"))
+        if day:
+            print(f"  [auto] catalog : {day[0].name}  (from {tle_dir})")
+            return day[0]
+
+    raise FileNotFoundError(
+        f"catalog(TLE) 를 찾지 못했습니다: 현재 폴더의 'catalog.txt'/'*catalog.txt' "
+        f"또는 인근 TLE 폴더의 '{date or 'YYYYMMDD'}_*_catalog.txt' ({folder})"
+    )
 
 
 # =============================================================================

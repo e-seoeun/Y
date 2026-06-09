@@ -115,8 +115,12 @@ raw FTP 관측 파일. 다음 순서로 입력이 결정된다.
 
 ### `catalog.txt` (str2tle 입력) — TLE
 published / classified / 관심 위성 1개 무엇이든 가능. 객체당 3줄(name + line1 + line2).
-- `catalog.txt` 가 있으면 그것을 쓰고, 없으면 `*catalog.txt` 로 끝나는 파일
-  (예: `20250517_0002_catalog.txt`) 을 자동으로 찾는다.
+다음 순서로 자동 결정된다.
+1. 현재 폴더에 `catalog.txt` 가 있으면 → 그것.
+2. 현재 폴더에 `*catalog.txt` (예: `20250517_0002_catalog.txt`) 가 있으면 → 그것.
+3. 둘 다 없으면 → 상위에서 **`TLE` 폴더**를 찾아, 현재 경로의 날짜(`YYYYMMDD`)에 해당하는
+   `YYYYMMDD_*_catalog.txt` 중 **가장 이른 시간**을 자동으로 쓴다.
+   (예: `YSPACE/20260501/GoHeung/` 에서 실행 → `YSPACE/TLE/20260501_*_catalog.txt`)
 
 ### `str_p.txt` (선택) — str2tle 입력
 str2tle 는 streak 의 첫 줄(header)만 읽으므로 `str.txt` 를 그대로 입력해도 된다.
@@ -132,16 +136,19 @@ str2tle 는 streak 의 첫 줄(header)만 읽으므로 `str.txt` 를 그대로 �
 
 ## 사용법
 
-자료 폴더로 이동해서 명령만 실행한다.
+처리할 자료 폴더로 이동해서 명령 두 개만 실행한다. 결과는 그 폴더에 생성된다.
 
 ```bash
-cd /path/to/데이터폴더
+cd /path/to/데이터폴더       # 예: ~/YSPACE/20260501/GoHeung
 
 ftp2str        # raw FTP → str.txt
-str2tle        # str.txt + site.txt + catalog → str_m.txt
+str2tle        # str.txt + (SUMMARY 좌표) + (catalog) → str_m.txt
 # 또는 한 번에
 ssa run
 ```
+
+`str2tle` 는 좌표를 `*_SUMMARY.txt` 에서, TLE 를 현재 폴더 또는 인근 `TLE` 폴더에서
+자동으로 찾으므로, **별도 준비 없이 두 명령이면 끝난다.**
 
 설치 없이 스크립트로:
 ```bash
@@ -150,27 +157,9 @@ python3 /path/to/SSA/str2tle.py
 python3 /path/to/SSA/main.py run
 ```
 
-### 특정 날짜/사이트 실행 (`scripts/run.sh`)
-
-`YSPACE/YYYYMMDD/site_name/` 구조이고 TLE 가 `YSPACE/TLE/YYYYMMDD_HHMM_catalog.txt`
-형태로 모여 있는 환경에서, **날짜·사이트 하나**를 골라 한 번에 돌리는 스크립트.
-
-- **입력은 `YSPACE` 에서 읽기만** 하고(원본이 읽기 전용이어도 됨), **결과는 쓰기 가능한
-  출력 폴더(`OUTBASE`, 기본 `~/ssa_out`)** 아래 `YYYYMMDD/site_name/` 에 만든다.
-- 그날 TLE 중 **가장 이른 시간의 catalog** 를 자동으로 골라 쓰고, 관측소 좌표는
-  `*_SUMMARY.txt` 에서 자동으로 읽는다.
-
-```bash
-chmod +x ~/SSA/scripts/run.sh
-~/SSA/scripts/run.sh 20260501 GoHeung                       # 기본 경로
-~/SSA/scripts/run.sh 20260501 GoHeung /path/YSPACE /path/out  # 경로 직접 지정
-```
-결과: `OUTBASE/<날짜>/<사이트>/str_m.txt`
-
-> 입력 폴더가 읽기 전용(예: 공유 스토리지)이라 그 자리에 결과를 쓸 수 없을 때를 위한
-> 구성이다. 이 스크립트는 특정 구조(YSPACE)·TLE 이름 규칙에 맞춘 예시이며, 다른 구조라면
-> 상단 주석을 참고해 수정한다. 핵심 프로그램(`ftp2str`/`str2tle`)은 구조와 무관하게
-> "현재 폴더 + 고정 파일명" 으로만 동작한다.
+> 결과 파일(`str.txt`, `str_m.txt`)을 만들려면 **현재 폴더에 쓰기 권한**이 있어야 한다.
+> 공유 스토리지처럼 읽기 전용인 폴더에서는, 쓰기 가능한 위치에 자료를 복사/링크한 뒤
+> 그 폴더에서 실행한다.
 
 ---
 
