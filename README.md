@@ -153,19 +153,24 @@ python3 /path/to/SSA/main.py run
 ### 여러 폴더 일괄 실행 (`scripts/run_all.sh`)
 
 자료가 `YSPACE/YYYYMMDD/site_name/` 구조이고 TLE 가 `YSPACE/TLE/YYYYMMDD_HHMM_catalog.txt`
-형태로 모여 있는 환경을 위한 보조 스크립트. 각 폴더마다 **그날 가장 이른 시간의 catalog**
-를 `catalog.txt` 로 링크한 뒤 `ftp2str` + `str2tle` 를 실행한다. (각 폴더에 `site.txt` 는
-미리 있어야 한다.)
+형태로 모여 있는 환경을 위한 보조 스크립트.
+
+- **입력은 `YSPACE` 에서 읽기만** 하고(원본이 읽기 전용이어도 됨), **결과는 쓰기 가능한
+  출력 폴더(`OUTBASE`)** 아래 `YYYYMMDD/site_name/` 에 만든다.
+- 각 폴더마다: 그날 **가장 이른 시간의 catalog** 를 `catalog.txt` 로 링크 →
+  `ftp2str` → `str2tle`. 관측소 좌표는 `*_SUMMARY.txt` 에서 자동으로 읽는다.
 
 ```bash
-cp /path/to/SSA/scripts/run_all.sh ~/YSPACE/   # YSPACE 안에 두거나
-chmod +x ~/YSPACE/run_all.sh
-~/YSPACE/run_all.sh                            # 또는: run_all.sh /path/to/YSPACE
+chmod +x ~/SSA/scripts/run_all.sh
+~/SSA/scripts/run_all.sh                       # 기본: YSPACE=~/YSPACE, OUTBASE=~/ssa_out
+~/SSA/scripts/run_all.sh /path/to/YSPACE /path/to/out   # 경로 직접 지정
 ```
+결과: `OUTBASE/<날짜>/<사이트>/str_m.txt`
 
-> 이 스크립트는 특정 폴더 구조(YSPACE)와 TLE 이름 규칙에 맞춘 예시다. 다른 구조라면
-> 스크립트 상단 주석을 참고해 수정해서 쓰면 된다. 핵심 프로그램(`ftp2str`/`str2tle`)은
-> 구조와 무관하게 "현재 폴더 + 고정 파일명" 으로만 동작한다.
+> 입력 폴더가 읽기 전용(예: 공유 스토리지)이라 그 자리에 결과를 쓸 수 없을 때를 위한
+> 구성이다. 이 스크립트는 특정 구조(YSPACE)·TLE 이름 규칙에 맞춘 예시이며, 다른 구조라면
+> 상단 주석을 참고해 수정한다. 핵심 프로그램(`ftp2str`/`str2tle`)은 구조와 무관하게
+> "현재 폴더 + 고정 파일명" 으로만 동작한다.
 
 ---
 
