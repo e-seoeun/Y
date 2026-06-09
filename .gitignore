@@ -13,11 +13,12 @@ data/
 *.fits
 *.csv
 
-# --- Legacy / out-of-scope 코드 (process2 까지만 공유) ---
+# --- 파이프라인에서 쓰지 않는 로컬 코드 (공유 제외) ---
+config.py
+classes/
 process3_iod.py
 process4_od.py
 rebuild_passed_all.py
 analyze/
 batch_least_square_estimation/
 initial_orbit_determination/
-classes/read_files.py

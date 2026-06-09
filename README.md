@@ -2,125 +2,200 @@
 
 관측 streak (raw FTP) 을 받아 TLE/SGP4 기반으로 위성을 식별하는 파이프라인.
 
-## 설계 원칙: CWD + 고정 파일명
-
-각 프로그램은 **현재 작업 폴더(CWD)의 고정 이름 파일**만 읽고 쓴다.
-경로·날짜·사이트·카메라 등 **어떤 외부 정보도 가정하지 않는다.** 처리할 자료가 든
-폴더로 이동(`cd`)한 뒤 실행하면 된다. 기대하는 입력 파일이 없으면 오류를 낸다.
-
-이렇게 경로/파일이름을 코드에 고정하지 않는 이유는, 실관측뿐 아니라
-**simulated data, derived TLE 등 임의의 경우에도 동일한 프로그램을 그대로** 쓰기
-위함이다. "무엇을 어디서 처리할지" 는 폴더 구성(준비 단계의 bash 등)이 담당한다.
+두 개의 프로그램으로 이루어진다.
 
 ```
-./ftp.txt (또는 폴더 내 raw FTP 자동감지)  ──ftp2str.py──▶  ./str.txt
-./site.txt ./str_p.txt ./catalog.txt        ──str2tle.py──▶  ./str_m.txt
+raw FTP (관측)                         ──ftp2str──▶   str.txt   (1초 간격 streak)
+str.txt + site.txt + catalog(TLE)      ──str2tle──▶   str_m.txt (식별 결과)
 ```
 
-- **`ftp2str.py`** : FTP file → simple streak. center 기준 ±1초 대칭 1초 grid 로 LS
-  resampling, TLE matching 에 부적합한 noisy streak 은 제거. 입력 결정 순서:
-  1. `ftp.txt` 가 있으면 → 그 파일만 처리 (고정 파일명)
-  2. 없으면 → 현재 폴더의 `*.txt` 중 raw FTP 형식(`FF_*.fits` 블록 포함)을 **이름과
-     무관하게 내용으로 자동 감지**하여 모두 처리, `str.txt` 하나로 통합. 한 폴더에
-     카메라 여러 개(`*_cam1~5.txt`)가 있으면 자동으로 합쳐진다. (`re_*`, `SUMMARY`,
-     `catalog.txt` 등 FTP 형식이 아닌 파일은 내용으로 자동 제외.)
-- **`str2tle.py`** : TLE 후보군 SGP4 전파 → angular distance / PA / 각속도 / D1·D2 기반
-  stage-1 / stage-2 평가 → 최적 매칭 1개.
+- **`ftp2str`** : FTP 관측 파일에서 streak 속성을 뽑아 1초 간격으로 resampling 하고,
+  TLE 매칭에 부적합한 noisy streak 을 걸러 `str.txt` 를 만든다.
+- **`str2tle`** : `str.txt` 의 각 streak 에 대해 TLE 후보를 SGP4 로 전파하여 가장
+  잘 맞는 위성 1개를 찾아 `str_m.txt` 를 만든다.
 
-## 입출력 파일
+---
 
-| 프로그램 | 입력 (CWD) | 출력 (CWD) |
+## 설계 원칙: "현재 폴더 + 고정 파일명"
+
+각 프로그램은 **현재 작업 폴더(CWD)의 고정 이름 파일**만 읽고 쓴다. 경로·날짜·사이트·
+카메라 등 **어떤 외부 정보도 가정하지 않는다.** 처리할 자료가 든 폴더로 이동(`cd`)한
+뒤 명령을 실행하면 된다. 기대하는 입력이 없으면 오류를 낸다.
+
+이렇게 한 이유는 실관측뿐 아니라 **simulated data, derived TLE 등 임의의 경우에도
+같은 프로그램을 그대로** 쓰기 위함이다. "무엇을 어디서 처리할지"는 폴더 구성이 담당한다.
+
+| 프로그램 | 입력 (현재 폴더) | 출력 (현재 폴더) |
 |---|---|---|
-| `ftp2str.py` | `ftp.txt` (없으면 raw FTP `*.txt` 자동감지) | `str.txt` |
-| `str2tle.py` | `site.txt`, `str_p.txt`, `catalog.txt` | `str_m.txt` |
+| `ftp2str` | `ftp.txt` *(없으면 raw FTP `*.txt` 자동 감지)* | `str.txt` |
+| `str2tle` | `site.txt`, `str_p.txt`·`str.txt`, `catalog.txt`·`*catalog.txt` | `str_m.txt` |
 
-- **`ftp.txt`** : raw FTP 관측 파일. 이 이름이 있으면 그것만 처리한다. 없으면 폴더 내
-  raw FTP `*.txt`(예: `*_cam1~5.txt`)를 내용으로 감지해 모두 통합 처리한다.
-- **`str.txt`** : streak 당 `line1`(property) + `line2~N`(1초 간격 자료) + 구분선.
-  - `line1` : `streak_id  N  time  RA_center  Dec_center  MotionAngle  Speed`
-  - `line2~N` : `time  RA  Dec  MeanIntensity`  (N = 1초 간격 자료 개수)
-  - `streak_id` : FTP image name + streak number 를 합친 단일 문자열.
-- **`str_p.txt`** : 각 streak 의 `line1` 만 모은 파일 (TLE matching 입력).
-  여러 카메라 `str.txt` 를 합친 뒤 `grep` 으로 추출:
-  ```bash
-  cat cam*/str.txt > str.txt        # 카메라 통합
-  grep '^FF' str.txt > str_p.txt    # property line(line1)만 추출
-  ```
-  *(참고: `str2tle.py` 는 body 라인을 무시하므로 `str.txt` 를 그대로 입력해도 동작한다.)*
-- **`site.txt`** : 관측소 위치. 처음 등장하는 숫자 3개를 `lat, long, elevation(m)`
-  순으로 읽는다. `#` 주석과 `lat = 37.5` 같은 라벨 형식 허용.
-  ```
-  lat 34.5261
-  lon 127.4470
-  elev 44.0
-  ```
-- **`catalog.txt`** : TLE. published / classified / 관심 TLE 1개 무엇이든 가능
-  (객체당 3줄: name + line1 + line2).
-- **`str_m.txt`** : `str_p.txt` 각 line 에 매칭 결과를 덧붙인 결과 (아래 포맷 참조).
+---
 
 ## 설치
 
-Python 3.9+ 권장. 의존성: `numpy`, `pandas`, `astropy`, `sgp4`
+Python 3.9 이상. 의존성: `numpy`, `pandas`, `astropy`, `sgp4`.
 
-방법 A — 명령어 설치 (권장, OS 무관):
+### 1) 코드 받기
+
 ```bash
+git clone https://github.com/e-seoeun/Y.git SSA
+cd SSA
+```
+
+### 2) 환경 만들고 설치 — **sudo 권한 유무에 따라**
+
+**(A) `python3-venv` 가 이미 깔려 있다면 (권장)**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -e .
 ```
-→ `ftp2str`, `str2tle`, `ssa` 명령이 등록되어 어느 폴더에서든 바로 쓸 수 있다.
 
-방법 B — 의존성만 설치하고 스크립트를 경로로 실행:
+**(B) sudo 가 없고 venv 생성이 안 될 때 — 사용자 영역(`--user`) 설치**
 ```bash
-pip install -r requirements.txt
+pip install --user -e .
+# 명령(ftp2str 등)이 ~/.local/bin 에 생긴다. PATH 에 없으면 한 번 추가:
+export PATH="$HOME/.local/bin:$PATH"          # 영구 적용은 ~/.bashrc 에 추가
 ```
+
+**(C) conda 를 쓴다면 (sudo 불필요)**
+```bash
+conda create -n ssa python=3.11 -y
+conda activate ssa
+pip install -e .
+```
+
+설치가 되면 어느 폴더에서든 다음 명령을 쓸 수 있다:
+
+| 명령 | 동작 |
+|---|---|
+| `ftp2str` | 현재 폴더 raw FTP → `str.txt` |
+| `str2tle` | 현재 폴더 입력 → `str_m.txt` |
+| `ssa run` | `ftp2str` + `str2tle` 연속 실행 |
+
+> **설치 없이 쓰기:** `pip install -r requirements.txt` 로 의존성만 깔고,
+> 명령 대신 `python3 /경로/SSA/ftp2str.py` 처럼 스크립트를 직접 실행해도 된다.
+
+### 설치 확인
+```bash
+which ftp2str        # 경로가 나오면 성공
+```
+
+---
+
+## 입력 파일 준비
+
+처리할 자료 폴더에 아래 파일들을 둔다. 이름은 고정이지만 **자동 감지** 규칙이 있어
+유연하다.
+
+### `ftp.txt` (ftp2str 입력)
+raw FTP 관측 파일. 다음 순서로 입력이 결정된다.
+1. `ftp.txt` 가 있으면 → 그 파일만 처리.
+2. 없으면 → 폴더 안 `*.txt` 중 **raw FTP 형식(`FF_*.fits` 블록 포함)** 을 이름과
+   무관하게 내용으로 자동 감지하여 **모두 통합**해 `str.txt` 하나로 만든다.
+   - `*_cam1.txt ~ *_cam7.txt`, `AQ0101_..._FTP.txt` 등 **이름이 달라도** 잡힌다.
+   - `re_*`, `*SUMMARY*`, 이미지/압축/`.cal` 등 FTP 가 아닌 파일은 자동 제외.
+
+> 여러 카메라가 한 폴더에 있으면 자동으로 합쳐진다. 굳이 `ftp.txt` 로 따로 만들 필요
+> 없이 폴더에서 `ftp2str` 만 실행하면 된다.
+
+### `site.txt` (str2tle 입력) — 관측소 위치
+숫자 3개를 **`lat, lon, elevation(m)` 순서**로 적는다. 공백/콤마 구분, `#` 주석 허용.
+```
+34.5261, 127.4470, 44.0
+```
+> 순서 주의: 위도, 경도, 고도(미터) 순이다.
+
+### `catalog.txt` (str2tle 입력) — TLE
+published / classified / 관심 위성 1개 무엇이든 가능. 객체당 3줄(name + line1 + line2).
+- `catalog.txt` 가 있으면 그것을 쓰고, 없으면 `*catalog.txt` 로 끝나는 파일
+  (예: `20250517_0002_catalog.txt`) 을 자동으로 찾는다.
+
+### `str_p.txt` (선택) — str2tle 입력
+str2tle 는 streak 의 첫 줄(header)만 읽으므로 `str.txt` 를 그대로 입력해도 된다.
+`str_p.txt` 가 있으면 그것을, 없으면 `str.txt` 를 자동으로 쓴다.
+
+> 명세상 여러 카메라 결과를 합쳐 `grep` 으로 header 만 뽑아 `str_p.txt` 를 만들 수
+> 있지만, 위 자동 통합/자동 선택 때문에 보통 **필요 없다.**
+> ```bash
+> grep '^FF' str.txt > str_p.txt    # 필요할 때만
+> ```
+
+---
 
 ## 사용법
 
-자료 폴더로 이동한 뒤 실행한다. 코드는 어디에 두어도 무방하다.
+자료 폴더로 이동해서 명령만 실행한다.
 
 ```bash
-cd /data/case01     # ftp.txt 등이 있는 폴더
+cd /path/to/데이터폴더
 
-# 방법 A (pip install -e . 한 경우) — 어디서든
-ftp2str
-str2tle
-ssa run             # ftp2str + str2tle
-
-# 방법 B (스크립트를 경로로)
-python /path/to/ftp2str.py
-python /path/to/str2tle.py
-python /path/to/main.py run
-python /path/to/main.py            # 인자 없이 대화형
+ftp2str        # raw FTP → str.txt
+str2tle        # str.txt + site.txt + catalog → str_m.txt
+# 또는 한 번에
+ssa run
 ```
+
+설치 없이 스크립트로:
+```bash
+python3 /path/to/SSA/ftp2str.py
+python3 /path/to/SSA/str2tle.py
+python3 /path/to/SSA/main.py run
+```
+
+---
 
 ## 결과 파일 포맷 (`str_m.txt`)
 
 ```
 # streak_name   N  time                      RA_center  Dec_center  MotionAng     Speed  NORAD   d1   d2   da   dv
-FF_KR0004_..._0001  5  2025-05-17T11:14:00.376  111.5258  71.7837  52.2599  0.628533  57435  ...
+FF_KR0004_..._0001  5  2025-05-17T11:14:00.376  111.5258  71.7837   52.2599  0.628533  57435  ...
 ...
-FF_KR0004_..._0002  9  2025-05-17T11:28:18.832  216.0493  85.3717 135.8007  0.812431  no_match  -  -  -  -
+FF_KR0004_..._0002  9  2025-05-17T11:28:18.832  216.0493  85.3717  135.8007  0.812431  no_match  -  -  -  -
 ```
 
-컬럼:
-- `NORAD` : 매칭된 위성번호 또는 `no_match`
-- `d1`, `d2` : observation vs candidate 선분의 normal / parallel 거리 (deg)
-- `da` : position angle 차이 (deg)
-- `dv` : 각속도 상대오차 (|cand - obs| / |obs|)
+| 컬럼 | 의미 |
+|---|---|
+| `streak_name` | FTP image name + streak number |
+| `N` | 1초 간격 자료 개수 |
+| `time` | center 시각 (UTC) |
+| `RA_center` / `Dec_center` | center 의 적경/적위 (deg) |
+| `MotionAng` / `Speed` | streak 의 position angle (deg) / 각속도 (deg/s) |
+| `NORAD` | 매칭된 위성번호, 없으면 `no_match` |
+| `d1` / `d2` | obs vs candidate 선분의 normal / parallel 거리 (deg) |
+| `da` | position angle 차이 (deg) |
+| `dv` | 각속도 상대오차 `|cand-obs|/|obs|` |
 
 매칭 실패 시 `d1~dv` 는 `-`.
 
-> `str_p.txt` 에는 1초 grid body 가 없으므로, `d1/d2` 계산에 필요한 center ±1초 두 점은
-> header 의 `(RA_center, Dec_center, MotionAngle, Speed)` 로부터 great-circle 상에서
-> 해석적으로 복원한다 (`ftp2str` 의 motion 계산 역연산).
+---
 
-## 보조 모듈
+## 자주 묻는 문제
 
+- **`입력 FTP 파일을 ... 찾지 못했습니다`** : 현재 폴더에 raw FTP(`FF_*.fits` 블록을
+  가진 `*.txt`)가 없다. 폴더 위치를 확인하거나 `ftp.txt` 를 둔다.
+- **`streak 파일이 ... 없습니다 (str_p.txt 또는 str.txt)`** : `ftp2str` 를 먼저 실행해
+  `str.txt` 를 만든 뒤 `str2tle` 를 실행한다.
+- **`catalog 파일이 ... 없습니다`** : 폴더에 `catalog.txt` 또는 `*catalog.txt` 가 없다.
+- **매칭 결과가 이상함** : `site.txt` 의 순서가 `lat, lon, elev` 인지 확인한다.
+- **명령(`ftp2str`)을 못 찾음** : venv/conda 를 `activate` 했는지, 또는 `--user` 설치 시
+  `~/.local/bin` 이 PATH 에 있는지 확인한다.
+
+---
+
+## 진행 표시
+`str2tle` 는 실행 중 한 줄짜리 진행 바로 `진행률 / matched 수 / ETA` 를 보여준다.
 ```
-SSA/
-├── main.py              # CLI 진입점 (CWD 고정 파일명)
-├── ftp2str.py           # FTP -> str.txt
-├── str2tle.py           # site/str_p/catalog -> str_m.txt
-├── candidate_search.py  # TLE/SGP4 후보 탐색
-├── motion.py            # angular motion (관측 / 후보)
-└── evaluate.py          # D1/D2 + stage1/stage2 평가
+  [███████████████░░░░░░░░░░░░░░░]  50.0%  6894/13788  matched=5800  ETA 41s
+```
+
+## 모듈 구성
+```
+ftp2str.py            # FTP -> str.txt
+str2tle.py            # site/str/catalog -> str_m.txt
+main.py               # CLI (ftp2str / str2tle / run)
+candidate_search.py   # TLE/SGP4 후보 탐색
+motion.py             # angular motion (관측 / 후보)
+evaluate.py           # D1/D2 + stage1/stage2 평가
 ```
