@@ -100,12 +100,18 @@ raw FTP 관측 파일. 다음 순서로 입력이 결정된다.
 > 여러 카메라가 한 폴더에 있으면 자동으로 합쳐진다. 굳이 `ftp.txt` 로 따로 만들 필요
 > 없이 폴더에서 `ftp2str` 만 실행하면 된다.
 
-### `site.txt` (str2tle 입력) — 관측소 위치
-숫자 3개를 **`lat, lon, elevation(m)` 순서**로 적는다. 공백/콤마 구분, `#` 주석 허용.
+### 관측소 위치 (str2tle 입력)
+다음 순서로 결정된다.
+1. `site.txt` 가 있으면 → 그것을 사용.
+2. 없으면 → 폴더 안 **`*_SUMMARY.txt`** 에서 `lat`, `lon`, `elev` 를 자동으로 읽는다
+   (`"elev": 44.0  "lat": 34.526  "lon": 127.447` 형식). **대부분 별도 준비가 필요 없다.**
+
+`site.txt` 를 직접 만들 경우 숫자 3개를 **`lat, lon, elevation(m)` 순서**로 적는다
+(공백/콤마 구분, `#` 주석, `lat=..` 라벨 형식 허용):
 ```
 34.5261, 127.4470, 44.0
 ```
-> 순서 주의: 위도, 경도, 고도(미터) 순이다.
+> 라벨(`lat`/`lon`/`elev`)이 있으면 순서와 무관하게 읽고, 없으면 위 순서로 해석한다.
 
 ### `catalog.txt` (str2tle 입력) — TLE
 published / classified / 관심 위성 1개 무엇이든 가능. 객체당 3줄(name + line1 + line2).
@@ -143,6 +149,23 @@ python3 /path/to/SSA/ftp2str.py
 python3 /path/to/SSA/str2tle.py
 python3 /path/to/SSA/main.py run
 ```
+
+### 여러 폴더 일괄 실행 (`scripts/run_all.sh`)
+
+자료가 `YSPACE/YYYYMMDD/site_name/` 구조이고 TLE 가 `YSPACE/TLE/YYYYMMDD_HHMM_catalog.txt`
+형태로 모여 있는 환경을 위한 보조 스크립트. 각 폴더마다 **그날 가장 이른 시간의 catalog**
+를 `catalog.txt` 로 링크한 뒤 `ftp2str` + `str2tle` 를 실행한다. (각 폴더에 `site.txt` 는
+미리 있어야 한다.)
+
+```bash
+cp /path/to/SSA/scripts/run_all.sh ~/YSPACE/   # YSPACE 안에 두거나
+chmod +x ~/YSPACE/run_all.sh
+~/YSPACE/run_all.sh                            # 또는: run_all.sh /path/to/YSPACE
+```
+
+> 이 스크립트는 특정 폴더 구조(YSPACE)와 TLE 이름 규칙에 맞춘 예시다. 다른 구조라면
+> 스크립트 상단 주석을 참고해 수정해서 쓰면 된다. 핵심 프로그램(`ftp2str`/`str2tle`)은
+> 구조와 무관하게 "현재 폴더 + 고정 파일명" 으로만 동작한다.
 
 ---
 

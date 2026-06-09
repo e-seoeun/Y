@@ -75,35 +75,64 @@ W_NORAD, W_DD = 8, 8
 
 
 # =============================================================================
-# site.txt 파싱 (lat, long, elevation)
+# 관측소 위치 읽기 (site.txt 또는 *_SUMMARY.txt)
 # =============================================================================
 def read_site(path: Path):
     """
-    site.txt → SimpleNamespace(lat_deg, lon_deg, alt_m).
+    위치 파일 → SimpleNamespace(lat_deg, lon_deg, alt_m).  elevation 단위는 미터.
 
-    파일에서 처음 등장하는 숫자 3개를 lat, long, elevation(미터) 순으로 읽는다.
-    공백/콤마 구분, '#' 주석, 'lat = 37.5' 같은 라벨 형식 모두 허용.
+    1) 라벨이 있으면 라벨로 읽는다 (순서 무관). *_SUMMARY.txt 의
+         '"elev": 44.0  "lat": 34.526  "lon": 127.447' 형식이 여기에 해당.
+       (lat/latitude, lon/lng/long/longitude, elev/elevation/altitude/height;
+        ':' '=' ',' '"' 구분 허용. 단어경계로 'camera_pointing_alt' 같은 건 제외.)
+    2) 라벨이 하나도 없으면 → 처음 등장하는 숫자 3개를 lat, lon, elev 순으로.
     """
     import re
     if not path.exists():
-        raise FileNotFoundError(f"site 파일이 현재 폴더에 없습니다: {path.resolve()}")
+        raise FileNotFoundError(f"위치 파일이 없습니다: {path.resolve()}")
 
-    nums: List[float] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for raw in f:
-            ln = raw.split("#", 1)[0]
-            for tok in re.findall(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", ln):
-                try:
-                    nums.append(float(tok))
-                except ValueError:
-                    continue
+    text = open(path, "r", encoding="utf-8", errors="ignore").read()
+    num = r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?"
+    sep = r"[\s:=\"',]*"  # 라벨과 숫자 사이 허용 구분자 (JSON/콤마/등호 등)
 
+    def _find(label_pat):
+        m = re.search(rf"\b(?:{label_pat})\b{sep}({num})", text, re.IGNORECASE)
+        return float(m.group(1)) if m else None
+
+    lat = _find(r"lat(?:itude)?")
+    lon = _find(r"lon(?:gitude)?|lng|long")
+    elev = _find(r"elev(?:ation)?|altitude|height")  # 'alt' 단독은 제외(오인 방지)
+
+    if lat is not None and lon is not None and elev is not None:
+        return SimpleNamespace(name="site", lat_deg=lat, lon_deg=lon, alt_m=elev)
+
+    # 라벨이 없으면 위치 기반 (lat, lon, elev 순)
+    nums = [float(t) for t in re.findall(num, text)]
     if len(nums) < 3:
         raise ValueError(
-            f"site.txt 에서 lat, long, elevation 3개 값을 찾지 못했습니다: {path.resolve()}"
+            f"위치 파일에서 lat, lon, elevation 값을 찾지 못했습니다: {path.resolve()}"
         )
-    lat, lon, elev = nums[0], nums[1], nums[2]
-    return SimpleNamespace(name="site", lat_deg=lat, lon_deg=lon, alt_m=elev)
+    return SimpleNamespace(name="site", lat_deg=nums[0], lon_deg=nums[1], alt_m=nums[2])
+
+
+def resolve_site(folder: Path) -> Path:
+    """
+    관측소 위치 파일을 결정한다.
+      1) site.txt 가 있으면 → 그것 (사용자가 명시적으로 둔 경우)
+      2) 없으면 → 이름에 'SUMMARY' 가 든 파일 (예: 20260501_GoHeung_SUMMARY.txt)
+                  대소문자/확장자 무관. 여러 개면 정렬상 첫 번째.
+      3) 하나도 없으면 → FileNotFoundError
+    """
+    if SITE_FILE.exists():
+        return SITE_FILE
+    summaries = sorted(p for p in folder.iterdir()
+                       if p.is_file() and "summary" in p.name.lower())
+    if not summaries:
+        raise FileNotFoundError(
+            f"위치 정보를 찾지 못했습니다: '{SITE_FILE.name}' 또는 '*SUMMARY*' 파일 "
+            f"({folder})"
+        )
+    return summaries[0]
 
 
 # =============================================================================
@@ -368,19 +397,19 @@ def _draw_progress(n_done: int, n_total: int, n_matched: int, elapsed: float):
 # =============================================================================
 # 공개 API
 # =============================================================================
-def run(site_path=SITE_FILE, str_path=None,
+def run(site_path=None, str_path=None,
         catalog_path=None, out_path=OUT_FILE) -> Path:
     """
-    ./site.txt + (./str_p.txt 또는 ./str.txt) + (./catalog.txt 또는 *catalog.txt)
-        → ./str_m.txt 생성.
+    (./site.txt 또는 *SUMMARY*) + (./str_p.txt 또는 ./str.txt)
+        + (./catalog.txt 또는 *catalog.txt) → ./str_m.txt 생성.
 
-    streak 입력은 header(line1)만 읽으므로 str_p.txt(추출본)든 str.txt(ftp2str 출력)든
-    동일하게 동작한다. str_path 미지정 시: str_p.txt 가 있으면 그것을, 없으면 str.txt 를
-    자동으로 쓴다. catalog_path 미지정 시: catalog.txt 가 있으면 그것을, 없으면
-    '*catalog.txt' 로 끝나는 파일을 자동으로 쓴다. 입력이 하나라도 없으면 FileNotFoundError.
+    각 입력은 미지정 시 자동으로 결정된다:
+      - 위치   : site.txt 가 있으면 그것, 없으면 *_SUMMARY.txt 에서 lat/lon/elev 추출
+      - streak : str_p.txt 가 있으면 그것, 없으면 str.txt (header line1 만 읽음)
+      - TLE    : catalog.txt 가 있으면 그것, 없으면 *catalog.txt
+    입력이 하나라도 없으면 FileNotFoundError.
     """
     folder = Path.cwd()
-    site_path = Path(site_path)
     out_path = Path(out_path)
 
     if str_path is not None:
@@ -403,11 +432,16 @@ def run(site_path=SITE_FILE, str_path=None,
     else:
         catalog_path = resolve_catalog(folder)  # catalog.txt 또는 *catalog.txt
 
-    site = read_site(site_path)  # site.txt 없으면 여기서 오류
+    if site_path is not None:
+        site_path = Path(site_path)
+    else:
+        site_path = resolve_site(folder)  # site.txt 또는 *SUMMARY*
+    site = read_site(site_path)
 
     print()
     print("=== str2tle ===")
-    print(f"  site     : lat={site.lat_deg}, lon={site.lon_deg}, alt={site.alt_m} m")
+    print(f"  site     : lat={site.lat_deg}, lon={site.lon_deg}, alt={site.alt_m} m "
+          f"(from {site_path.name})")
     print(f"  input    : {str_path}")
     print(f"  catalog  : {catalog_path}")
     print(f"  output   : {out_path}")
