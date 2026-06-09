@@ -150,20 +150,20 @@ python3 /path/to/SSA/str2tle.py
 python3 /path/to/SSA/main.py run
 ```
 
-### 여러 폴더 일괄 실행 (`scripts/run_all.sh`)
+### 특정 날짜/사이트 실행 (`scripts/run.sh`)
 
-자료가 `YSPACE/YYYYMMDD/site_name/` 구조이고 TLE 가 `YSPACE/TLE/YYYYMMDD_HHMM_catalog.txt`
-형태로 모여 있는 환경을 위한 보조 스크립트.
+`YSPACE/YYYYMMDD/site_name/` 구조이고 TLE 가 `YSPACE/TLE/YYYYMMDD_HHMM_catalog.txt`
+형태로 모여 있는 환경에서, **날짜·사이트 하나**를 골라 한 번에 돌리는 스크립트.
 
 - **입력은 `YSPACE` 에서 읽기만** 하고(원본이 읽기 전용이어도 됨), **결과는 쓰기 가능한
-  출력 폴더(`OUTBASE`)** 아래 `YYYYMMDD/site_name/` 에 만든다.
-- 각 폴더마다: 그날 **가장 이른 시간의 catalog** 를 `catalog.txt` 로 링크 →
-  `ftp2str` → `str2tle`. 관측소 좌표는 `*_SUMMARY.txt` 에서 자동으로 읽는다.
+  출력 폴더(`OUTBASE`, 기본 `~/ssa_out`)** 아래 `YYYYMMDD/site_name/` 에 만든다.
+- 그날 TLE 중 **가장 이른 시간의 catalog** 를 자동으로 골라 쓰고, 관측소 좌표는
+  `*_SUMMARY.txt` 에서 자동으로 읽는다.
 
 ```bash
-chmod +x ~/SSA/scripts/run_all.sh
-~/SSA/scripts/run_all.sh                       # 기본: YSPACE=~/YSPACE, OUTBASE=~/ssa_out
-~/SSA/scripts/run_all.sh /path/to/YSPACE /path/to/out   # 경로 직접 지정
+chmod +x ~/SSA/scripts/run.sh
+~/SSA/scripts/run.sh 20260501 GoHeung                       # 기본 경로
+~/SSA/scripts/run.sh 20260501 GoHeung /path/YSPACE /path/out  # 경로 직접 지정
 ```
 결과: `OUTBASE/<날짜>/<사이트>/str_m.txt`
 
