@@ -1,27 +1,36 @@
 """
 str2tle.py
 -----------
-Step 2: 통합 중간 파일 (`_str.txt`) 의 모든 streak 에 대해 TLE/SGP4 기반
-위성 식별을 수행하고, 단일 결과 파일 (`_str_m.txt`) 을 생성한다.
+TLE 목록 매칭.
 
-  in   : repository/interim/{date}/{site}/{date}_{site}_str.txt
-  out  : results/{date}/{site}/{date}_{site}_str_m.txt
-  tle  : repository/dot_tle/{date}.tle
+현재 폴더(CWD)의 고정 입력 파일을 읽어 고정 출력 파일을 만든다.
+경로/날짜/사이트 등 어떤 외부 정보도 가정하지 않는다.
 
-결과 컬럼:
-  streak_name  N  time  RA_center  Dec_center  MotionAngle  Speed
-  NORAD(or no_match)  d1  d2  da  dv
+  input  :  ./site.txt      (lat, long, elevation)
+            ./str_p.txt     (각 streak 의 property line; ftp2str 의 str.txt line1 들)
+            ./catalog.txt   (published / classified TLE, 또는 관심 TLE 1개. 객체당 3줄)
+  output :  ./str_m.txt
+
+str_p.txt 의 각 line 에 매칭결과를 덧붙인다:
+  streak_id  N  time  RA_center  Dec_center  MotionAngle  Speed
+    + no_match
+    + norad_id  d1  d2  da  dv
 
   - d1 / d2 : observation vs candidate 선분의 normal / parallel 거리 (deg)
   - da      : position angle 차이 (deg)
   - dv      : 각속도 상대오차 (|w_cand - w_obs| / |w_obs|)
 
+str_p.txt 에는 1초 grid body 가 없으므로, d1/d2 계산에 필요한 center ±1초 두 점은
+header 의 (RA_center, Dec_center, MotionAngle, Speed) 로부터 great-circle 상에서
+해석적으로 복원한다 (ftp2str 의 _compute_motion 역연산).
+
 공개 API:
-  run(date_str, site) -> Path     # str_m.txt 경로
+  run(...) -> Path     # str_m.txt 경로
 """
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import os
 import sys
@@ -29,9 +38,8 @@ import time as wall_time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List, Optional
+from typing import List
 
-import numpy as np
 import pandas as pd
 
 from candidate_search import build_orbit_cache, search_candidates
@@ -39,11 +47,8 @@ from motion import compute_candidate_motion
 from evaluate import (
     compute_d1_d2,
     evaluate_stage1, evaluate_stage2,
-    pa_diff_deg, safe_round,
+    pa_diff_deg,
 )
-
-# 경로 설정 → config.py 한 군데에서 관리
-from config import INTERIM_ROOT, TLE_ROOT, RESULTS_ROOT
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -51,10 +56,16 @@ except (AttributeError, Exception):
     pass
 
 
+# 고정 입출력 파일명 (현재 폴더 기준)
+SITE_FILE = Path("site.txt")
+STR_FILE = Path("str_p.txt")       # 1순위 입력 (있으면 사용)
+STR_FALLBACK = Path("str.txt")     # 없으면 ftp2str 출력(str.txt)을 바로 사용
+CATALOG_FILE = Path("catalog.txt")
+OUT_FILE = Path("str_m.txt")
+
 # 식별 파라미터 — 필요 시 조정
 SEARCH_RADIUS_DEG = 5.0                                 # 후보 cone 반경 [deg]
 N_WORKERS = max(1, (os.cpu_count() or 2) // 2 - 1)      # 병렬 워커 수
-PROGRESS_EVERY = 50                                     # 진행률 출력 간격 [streak]
 
 # 출력 컬럼 폭
 W_NAME, W_N, W_TIME = 45, 3, 23
@@ -64,118 +75,142 @@ W_NORAD, W_DD = 8, 8
 
 
 # =============================================================================
-# _str.txt 파싱
+# site.txt 파싱 (lat, long, elevation)
+# =============================================================================
+def read_site(path: Path):
+    """
+    site.txt → SimpleNamespace(lat_deg, lon_deg, alt_m).
+
+    파일에서 처음 등장하는 숫자 3개를 lat, long, elevation(미터) 순으로 읽는다.
+    공백/콤마 구분, '#' 주석, 'lat = 37.5' 같은 라벨 형식 모두 허용.
+    """
+    import re
+    if not path.exists():
+        raise FileNotFoundError(f"site 파일이 현재 폴더에 없습니다: {path.resolve()}")
+
+    nums: List[float] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            ln = raw.split("#", 1)[0]
+            for tok in re.findall(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?", ln):
+                try:
+                    nums.append(float(tok))
+                except ValueError:
+                    continue
+
+    if len(nums) < 3:
+        raise ValueError(
+            f"site.txt 에서 lat, long, elevation 3개 값을 찾지 못했습니다: {path.resolve()}"
+        )
+    lat, lon, elev = nums[0], nums[1], nums[2]
+    return SimpleNamespace(name="site", lat_deg=lat, lon_deg=lon, alt_m=elev)
+
+
+# =============================================================================
+# catalog 파일 자동 감지 ('catalog.txt' 또는 '*catalog.txt')
+# =============================================================================
+def resolve_catalog(folder: Path) -> Path:
+    """
+    catalog 파일을 결정한다.
+      1) catalog.txt 가 있으면 → 그것
+      2) 없으면 → '*catalog.txt' 로 끝나는 파일 (예: 20250517_0002_catalog.txt)
+                  여러 개면 이름 정렬상 첫 번째를 쓰고 안내한다.
+      3) 하나도 없으면 → FileNotFoundError
+    """
+    if CATALOG_FILE.exists():
+        return CATALOG_FILE
+    matches = sorted(p for p in folder.glob("*catalog.txt") if p.is_file())
+    if not matches:
+        raise FileNotFoundError(
+            f"catalog 파일이 현재 폴더에 없습니다: '{CATALOG_FILE.name}' "
+            f"또는 '*catalog.txt' ({folder})"
+        )
+    if len(matches) > 1:
+        print(f"  [주의] catalog 후보 {len(matches)}개 중 '{matches[0].name}' 사용 "
+              f"(전체: {', '.join(p.name for p in matches)})")
+    return matches[0]
+
+
+# =============================================================================
+# str_p.txt 파싱 (streak property line 들)
 # =============================================================================
 def _parse_time_token(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
-def _build_streak(header_toks, body_toks):
-    streak_id = header_toks[0]
-    t_center = _parse_time_token(header_toks[2])
-    ra_center = float(header_toks[3])
-    dec_center = float(header_toks[4])
-    pa_obs = float(header_toks[5])
-    w_obs = float(header_toks[6])
+def parse_str_p_file(path: Path) -> List[dict]:
+    """
+    str_p.txt → list[streak dict].
 
-    grid_t, grid_ra, grid_dec, grid_inten = [], [], [], []
-    for toks in body_toks:
-        if len(toks) < 4:
-            continue
-        grid_t.append(_parse_time_token(toks[0]))
-        grid_ra.append(float(toks[1]))
-        grid_dec.append(float(toks[2]))
-        try:
-            grid_inten.append(float(toks[3]))
-        except ValueError:
-            grid_inten.append(float("nan"))
+    각 streak property line:
+        streak_id  N  time  RA_center  Dec_center  MotionAngle  Speed
 
-    grid_t = pd.to_datetime(grid_t)
-    grid_t_sec = (grid_t - grid_t[0]).total_seconds().to_numpy(dtype=float)
-    return {
-        "streak_id":  streak_id,
-        "N":          len(grid_t),
-        "t_center":   t_center,
-        "ra_center":  ra_center,
-        "dec_center": dec_center,
-        "pa_obs":     pa_obs,
-        "w_obs":      w_obs,
-        "grid_t":     grid_t,
-        "grid_t_sec": grid_t_sec,
-        "grid_ra":    np.asarray(grid_ra, dtype=float),
-        "grid_dec":   np.asarray(grid_dec, dtype=float),
-        "grid_inten": np.asarray(grid_inten, dtype=float),
-    }
-
-
-def parse_str_file(path: Path) -> List[dict]:
-    """`_str.txt` → list[streak dict]."""
+    body line(4토큰)·구분자·주석은 무시하므로, line1 만 추출한 str_p.txt 든
+    body 가 남아있는 str.txt 든 동일하게 처리된다.
+    """
     streaks: List[dict] = []
     with open(path, "r", encoding="utf-8") as f:
-        cur_header = None
-        cur_body: List[List[str]] = []
-
-        def _flush():
-            nonlocal cur_header, cur_body
-            if cur_header is not None:
-                try:
-                    streaks.append(_build_streak(cur_header, cur_body))
-                except Exception:
-                    pass
-            cur_header = None
-            cur_body = []
-
         for raw in f:
             ln = raw.strip()
-            if not ln:
-                continue
-            if ln.startswith("---"):
-                _flush()
+            if not ln or ln.startswith("#") or ln.startswith("-"):
                 continue
             toks = ln.split()
-            if cur_header is None:
-                cur_header = toks
-            else:
-                cur_body.append(toks)
-        _flush()
+            if len(toks) < 7:
+                continue
+            try:
+                streaks.append({
+                    "streak_id":  toks[0],
+                    "N":          int(toks[1]),
+                    "t_center":   _parse_time_token(toks[2]),
+                    "ra_center":  float(toks[3]),
+                    "dec_center": float(toks[4]),
+                    "pa_obs":     float(toks[5]),
+                    "w_obs":      float(toks[6]),
+                })
+            except (ValueError, IndexError):
+                continue
     return streaks
 
 
 # =============================================================================
-# 1초 grid 보간 (D1/D2 용 row_before/after)
+# center + PA + speed → center ±1초 두 점 (great-circle destination)
 # =============================================================================
-def _wrap_ra(ra1, ra0):
-    return ra0 + ((ra1 - ra0 + 540.0) % 360.0 - 180.0)
+def _dest_point(ra0_deg, dec0_deg, pa_deg, dist_deg):
+    """center 에서 bearing(N→E) pa, 각거리 dist 떨어진 점의 (ra, dec) [deg]."""
+    ra0 = math.radians(ra0_deg)
+    dec0 = math.radians(dec0_deg)
+    pa = math.radians(pa_deg)
+    d = math.radians(dist_deg)
 
-
-def _interp(streak, t_target: datetime):
-    t_sec = (t_target - streak["grid_t"][0]).total_seconds()
-    g_t = streak["grid_t_sec"]
-    g_ra = streak["grid_ra"]
-    g_dec = streak["grid_dec"]
-    if t_sec <= g_t[0]:
-        return float(g_ra[0]), float(g_dec[0])
-    if t_sec >= g_t[-1]:
-        return float(g_ra[-1]), float(g_dec[-1])
-    i = int(np.searchsorted(g_t, t_sec))
-    alpha = (t_sec - g_t[i - 1]) / (g_t[i] - g_t[i - 1])
-    ra0 = float(g_ra[i - 1])
-    ra1 = _wrap_ra(float(g_ra[i]), ra0)
-    dec0 = float(g_dec[i - 1])
-    dec1 = float(g_dec[i])
-    return (ra0 + alpha * (ra1 - ra0)) % 360.0, dec0 + alpha * (dec1 - dec0)
+    dec1 = math.asin(
+        math.sin(dec0) * math.cos(d) + math.cos(dec0) * math.sin(d) * math.cos(pa)
+    )
+    ra1 = ra0 + math.atan2(
+        math.sin(pa) * math.sin(d) * math.cos(dec0),
+        math.cos(d) - math.sin(dec0) * math.sin(dec1),
+    )
+    return math.degrees(ra1) % 360.0, math.degrees(dec1)
 
 
 def _obs_rows(streak):
+    """
+    header (center, PA, speed) → (row_mid, row_before, row_after).
+    after  : center 에서 bearing=PA,      거리=speed(=deg/s × 1s)
+    before : center 에서 bearing=PA+180,  거리=speed
+    """
+    ra0 = streak["ra_center"]
+    dec0 = streak["dec_center"]
+    pa = streak["pa_obs"]
+    w = streak["w_obs"]
     t_mid = streak["t_center"]
-    t_before = t_mid - pd.Timedelta(seconds=1)
-    t_after = t_mid + pd.Timedelta(seconds=1)
-    ra_b, dec_b = _interp(streak, t_before)
-    ra_a, dec_a = _interp(streak, t_after)
+
+    ra_a, dec_a = _dest_point(ra0, dec0, pa, w)
+    ra_b, dec_b = _dest_point(ra0, dec0, pa + 180.0, w)
+
     return (
-        {"time": pd.Timestamp(t_mid),    "ra_ls": streak["ra_center"], "dec_ls": streak["dec_center"]},
-        {"time": pd.Timestamp(t_before), "ra_ls": ra_b,                "dec_ls": dec_b},
-        {"time": pd.Timestamp(t_after),  "ra_ls": ra_a,                "dec_ls": dec_a},
+        {"time": pd.Timestamp(t_mid),                              "ra_ls": ra0,  "dec_ls": dec0},
+        {"time": pd.Timestamp(t_mid - pd.Timedelta(seconds=1)),   "ra_ls": ra_b, "dec_ls": dec_b},
+        {"time": pd.Timestamp(t_mid + pd.Timedelta(seconds=1)),   "ra_ls": ra_a, "dec_ls": dec_a},
     )
 
 
@@ -314,51 +349,80 @@ def _format_row(r: dict) -> str:
 
 
 # =============================================================================
+# 진행 바 (한 줄, \r 로 갱신)
+# =============================================================================
+_BAR_W = 30
+
+
+def _draw_progress(n_done: int, n_total: int, n_matched: int, elapsed: float):
+    frac = (n_done / n_total) if n_total else 1.0
+    filled = int(_BAR_W * frac)
+    bar = "█" * filled + "░" * (_BAR_W - filled)
+    eta = elapsed / n_done * (n_total - n_done) if n_done else 0.0
+    line = (f"  [{bar}] {frac * 100:5.1f}%  {n_done}/{n_total}  "
+            f"matched={n_matched}  ETA {eta:.0f}s")
+    sys.stdout.write("\r" + line.ljust(76))
+    sys.stdout.flush()
+
+
+# =============================================================================
 # 공개 API
 # =============================================================================
-def run(date_str: str, site) -> Path:
+def run(site_path=SITE_FILE, str_path=None,
+        catalog_path=None, out_path=OUT_FILE) -> Path:
     """
-    한 (date, site) 에 대해 identification 실행 → str_m.txt 경로 반환.
+    ./site.txt + (./str_p.txt 또는 ./str.txt) + (./catalog.txt 또는 *catalog.txt)
+        → ./str_m.txt 생성.
 
-    Parameters
-    ----------
-    date_str : "YYYYMMDD"
-    site     : classes.sites.Site 또는 lat_deg/lon_deg/alt_m 속성을 가진 객체
+    streak 입력은 header(line1)만 읽으므로 str_p.txt(추출본)든 str.txt(ftp2str 출력)든
+    동일하게 동작한다. str_path 미지정 시: str_p.txt 가 있으면 그것을, 없으면 str.txt 를
+    자동으로 쓴다. catalog_path 미지정 시: catalog.txt 가 있으면 그것을, 없으면
+    '*catalog.txt' 로 끝나는 파일을 자동으로 쓴다. 입력이 하나라도 없으면 FileNotFoundError.
     """
-    site_name = site.name if hasattr(site, "name") else str(site)
-    str_path = INTERIM_ROOT / date_str / site_name / f"{date_str}_{site_name}_str.txt"
-    tle_path = TLE_ROOT / f"{date_str}.tle"
+    folder = Path.cwd()
+    site_path = Path(site_path)
+    out_path = Path(out_path)
 
-    if not str_path.exists():
+    if str_path is not None:
+        str_path = Path(str_path)
+        if not str_path.exists():
+            raise FileNotFoundError(f"streak 파일이 현재 폴더에 없습니다: {str_path.resolve()}")
+    elif STR_FILE.exists():
+        str_path = STR_FILE
+    elif STR_FALLBACK.exists():
+        str_path = STR_FALLBACK
+    else:
         raise FileNotFoundError(
-            f"_str.txt not found: {str_path}\n"
-            f"  → ftp2str.run({date_str!r}, site) 를 먼저 실행하세요."
+            f"streak 파일이 현재 폴더에 없습니다: {STR_FILE.name} 또는 {STR_FALLBACK.name} "
+            f"({Path.cwd()})"
         )
-    if not tle_path.exists():
-        raise FileNotFoundError(f"TLE not found: {tle_path}")
+    if catalog_path is not None:
+        catalog_path = Path(catalog_path)
+        if not catalog_path.exists():
+            raise FileNotFoundError(f"catalog 파일이 현재 폴더에 없습니다: {catalog_path.resolve()}")
+    else:
+        catalog_path = resolve_catalog(folder)  # catalog.txt 또는 *catalog.txt
 
-    out_dir = RESULTS_ROOT / date_str / site_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{date_str}_{site_name}_str_m.txt"
+    site = read_site(site_path)  # site.txt 없으면 여기서 오류
 
     print()
-    print("=== Step 2: identify ===")
-    print(f"  date     : {date_str}")
-    print(f"  site     : {site_name} "
-          f"(lat={site.lat_deg}, lon={site.lon_deg}, alt={site.alt_m} m)")
+    print("=== str2tle ===")
+    print(f"  site     : lat={site.lat_deg}, lon={site.lon_deg}, alt={site.alt_m} m")
     print(f"  input    : {str_path}")
-    print(f"  TLE      : {tle_path}")
+    print(f"  catalog  : {catalog_path}")
     print(f"  output   : {out_path}")
 
-    streaks = parse_str_file(str_path)
-    streaks = [s for s in streaks if len(s["grid_t"]) >= 2]
+    streaks = parse_str_p_file(str_path)
     n_total = len(streaks)
     print(f"  streaks  : {n_total}")
     if n_total == 0:
+        with open(out_path, "w", encoding="utf-8") as fout:
+            fout.write(_format_header() + "\n")
         return out_path
 
     print("  pre-check orbit cache ...")
-    _main_cache = build_orbit_cache([str(tle_path)])
+    tle_abs = str(catalog_path.resolve())
+    _main_cache = build_orbit_cache([tle_abs])
     print(f"  orbit cache size : {len(_main_cache)}")
     del _main_cache
 
@@ -378,18 +442,16 @@ def run(date_str: str, site) -> Path:
     with ctx.Pool(
         processes=N_WORKERS,
         initializer=_worker_init,
-        initargs=(str(tle_path), site_kwargs),
+        initargs=(tle_abs, site_kwargs),
     ) as pool:
         for r in pool.imap_unordered(_worker_process, streaks, chunksize=4):
             results.append(r)
             n_done += 1
             if r["norad"] != "no_match":
                 n_matched += 1
-            if n_done % PROGRESS_EVERY == 0 or n_done == n_total:
-                elapsed = wall_time.time() - t_start
-                eta = elapsed / n_done * (n_total - n_done) if n_done else 0
-                print(f"    [{n_done}/{n_total}] matched={n_matched}  "
-                      f"elapsed={elapsed:.1f}s  ETA={eta:.1f}s")
+            _draw_progress(n_done, n_total, n_matched,
+                           wall_time.time() - t_start)
+    sys.stdout.write("\n")  # 진행 바 줄 마무리
 
     results.sort(key=lambda x: x["time"])
     with open(out_path, "w", encoding="utf-8") as fout:
@@ -401,3 +463,7 @@ def run(date_str: str, site) -> Path:
           f"no_match={n_total - n_matched}, "
           f"total={wall_time.time() - t_start:.1f}s")
     return out_path
+
+
+if __name__ == "__main__":
+    run()

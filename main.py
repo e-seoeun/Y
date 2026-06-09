@@ -3,20 +3,25 @@ main.py
 -------
 SSA 위성 식별 파이프라인 진입점.
 
+모든 입출력은 "현재 폴더(CWD)의 고정 파일명" 을 사용한다. 경로/날짜/사이트/
+카메라 등 어떤 외부 정보도 가정하지 않으므로, simulated data / derived TLE 등
+임의의 경우에도 동일하게 쓸 수 있다. 처리할 자료가 든 폴더로 이동한 뒤 실행한다.
+
 서브커맨드:
-  ftp2str    raw FTP → repository/interim/.../<date>_<site>_str.txt
-  str2tle    _str.txt → results/.../<date>_<site>_str_m.txt
+  ftp2str    ./ftp.txt                          -> ./str.txt
+  str2tle    ./site.txt ./str_p.txt ./catalog.txt -> ./str_m.txt
   run        위 두 단계를 순서대로 실행
+             (run 은 str2tle 입력으로 str.txt 를 그대로 사용 — line1 만 읽음)
 
 예:
-  python main.py run 20260417 J
-  python main.py ftp2str 20260417 SJ
-  python main.py str2tle 20260417 SJ
-  python main.py                       # 대화형
+  cd /data/case01
+  python /path/to/main.py ftp2str
+  python /path/to/main.py str2tle
+  python /path/to/main.py run
 
-site 인자는 site code (J, G, U, H, UD, Y, YS, SJ, HC) 또는 풀네임 모두 OK.
-
-모든 입출력 경로는 config.py 에서 관리합니다.
+각 단계는 단독 실행도 가능:
+  python /path/to/ftp2str.py
+  python /path/to/str2tle.py
 """
 
 from __future__ import annotations
@@ -24,72 +29,47 @@ from __future__ import annotations
 import argparse
 import sys
 
-from classes.sites import get_any, SITES
-
 import ftp2str
 import str2tle
 
 
-def _prompt_if_missing(date_str: str | None, site_key: str | None):
-    if not date_str:
-        date_str = input("YYYYMMDD : ").strip()
-    if not site_key:
-        print("\nAvailable sites:")
-        for code, s in SITES.items():
-            print(f"  {code:>3s}  -  {s.name}")
-        site_key = input("Site code or name: ").strip()
-    return date_str, site_key
-
-
 def cmd_ftp2str(args):
-    date_str, site_key = _prompt_if_missing(args.date, args.site)
-    site = get_any(site_key)
-    ftp2str.run(date_str, site, cams=args.cams)
+    ftp2str.run()
 
 
 def cmd_str2tle(args):
-    date_str, site_key = _prompt_if_missing(args.date, args.site)
-    site = get_any(site_key)
-    str2tle.run(date_str, site)
+    str2tle.run()
 
 
 def cmd_run(args):
-    date_str, site_key = _prompt_if_missing(args.date, args.site)
-    site = get_any(site_key)
-    ftp2str.run(date_str, site, cams=args.cams)
-    str2tle.run(date_str, site)
+    out_str = ftp2str.run()
+    # str2tle 는 str_p.txt(line1만) 또는 str.txt(body 포함) 어느 쪽이든 처리 가능.
+    str2tle.run(str_path=out_str)
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="SSA satellite identification pipeline (FTP → str → identification).",
+        description="SSA satellite identification pipeline "
+                    "(CWD 고정 파일명: ftp.txt → str.txt → str_m.txt).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
     sub = ap.add_subparsers(dest="command")
-
     for name, fn, desc in [
-        ("ftp2str", cmd_ftp2str, "FTP raw  ->  str.txt   (Step 1)"),
-        ("str2tle", cmd_str2tle, "str.txt  ->  str_m.txt (Step 2: identification)"),
+        ("ftp2str", cmd_ftp2str, "./ftp.txt -> ./str.txt"),
+        ("str2tle", cmd_str2tle, "./site.txt ./str_p.txt ./catalog.txt -> ./str_m.txt"),
         ("run",     cmd_run,     "ftp2str + str2tle"),
     ]:
         p = sub.add_parser(name, help=desc)
-        p.add_argument("date", nargs="?", help="YYYYMMDD")
-        p.add_argument("site", nargs="?", help="Site code or name")
-        p.add_argument("--cams", nargs="*",
-                       help="cam IDs (ftp2str / run only; omit to auto-detect)")
         p.set_defaults(func=fn)
 
     args = ap.parse_args()
-
     if not args.command:
-        # interactive
         print("Commands: ftp2str | str2tle | run")
         cmd = input("command : ").strip()
         if cmd not in ("ftp2str", "str2tle", "run"):
             print(f"[ERROR] unknown command: {cmd}")
             sys.exit(1)
-        sys.argv = [sys.argv[0], cmd]
         args = ap.parse_args([cmd])
 
     args.func(args)

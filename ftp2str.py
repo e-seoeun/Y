@@ -1,16 +1,32 @@
 """
 ftp2str.py
 -----------
-Step 1: 여러 카메라의 raw FTP 관측을 날짜/사이트 단위로 통합한
-중간 파일 (`_str.txt`) 을 만든다.
+FTP file to simple streak.
 
-  raw  :  repository/observed_data/{date}/{site}/{date}_{site}_cam{N}.txt
-  out  :  repository/interim/{date}/{site}/{date}_{site}_str.txt
+현재 폴더(CWD)에서 raw FTP 자료를 읽어 고정 출력 파일을 만든다.
+경로/날짜/사이트/카메라 등 어떤 외부 정보도 가정하지 않는다.
+simulated data, derived TLE 등 임의의 경우에도 동일하게 사용하기 위함.
+
+입력 결정 순서:
+  1) ./ftp.txt 가 있으면 → 그 파일만 처리 (고정 파일명, 명세 기준)
+  2) 없으면 → 현재 폴더의 *.txt 중 raw FTP 형식('FF_*.fits' 블록 포함)을
+              이름과 무관하게 내용으로 자동 감지하여 모두 처리 (str.txt 로 통합)
+  3) 하나도 없으면 → 오류
+
+  input  :  ./ftp.txt  또는 자동 감지된 raw FTP *.txt (들)
+  output :  ./str.txt
+
+  - extract streak property for TLE matching
+  - derive mean data points at 1 sec interval
+  - drop noisy streak data not useful for TLE matching
 
 각 streak 출력 포맷:
   line 1   : streak_id  N  time  RA_center  Dec_center  MotionAngle  Speed
-  line 2~N : time  RA  Dec  MeanIntensity         (1초 간격 샘플)
+  line 2~N : time  RA  Dec  MeanIntensity         (1초 간격 자료)
   ------------------------                        (streak 구분자)
+
+  streak_id : FTP image name + streak number 를 합친 단일 문자열
+  N         : 1초 간격 자료의 개수
 
 핵심 정의:
   - center : streak 시작~끝의 중간 시각
@@ -19,8 +35,11 @@ Step 1: 여러 카메라의 raw FTP 관측을 날짜/사이트 단위로 통합�
   - RA/Dec (sample) : raw 관측점에 LS 1차 fit 후 grid 시각에서 평가
   - MeanIntensity   : raw 관측점 중 [t-0.5s, t+0.5s) 안에 있는 inten 의 평균
 
+한 폴더에 여러 카메라 raw FTP 가 같이 있으면 자동 감지 시 모두 통합한다.
+(ftp.txt 가 명시돼 있으면 그 1개만 처리.)
+
 공개 API:
-  run(date_str, site, cams=None) -> Path     # Path of generated _str.txt
+  run(in_path=None, out_path="str.txt") -> Path
 """
 
 from __future__ import annotations
@@ -34,34 +53,68 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
-# 경로 설정 → config.py 한 군데에서 관리
-from config import OBS_ROOT, INTERIM_ROOT as OUT_ROOT
+# 고정 입출력 파일명 (현재 폴더 기준)
+IN_FILE = Path("ftp.txt")
+OUT_FILE = Path("str.txt")
 
-# 사전 필터 (이 기준 미만은 _str.txt 에 안 들어감) — 필요 시 조정
+# 사전 필터 (이 기준 미만은 str.txt 에 안 들어감) — 필요 시 조정
 MIN_DURATION_S = 2.0
 MIN_N_OBS = 25
+
+# FTP 파일 앞부분 헤더 블록 개수 (streak 가 아님)
+N_HEADER_BLOCKS = 4
 
 STREAK_SEP = "------------------------"
 
 
 # =============================================================================
-# 파일/카메라 헬퍼
+# 입력 파일 자동 감지 (이름 무관, 내용 기반)
 # =============================================================================
-def _raw_filename(site_name: str, date_str: str, cam: str) -> str:
-    if site_name == "YoungYang_SSA":
-        return f"{date_str}_{site_name}_data{cam}.txt"
-    if site_name == "SSA_JangBogo":
-        return f"AQ0{cam}_{date_str}_FTP.txt"
-    return f"{date_str}_{site_name}_cam{cam}.txt"
+# 자동 감지 시 입력에서 제외할 출력/보조 파일 이름
+_EXCLUDE_NAMES = {"str.txt", "str_p.txt", "str_m.txt", "catalog.txt", "site.txt"}
+
+# 자동 감지 시 건너뛸 확장자 (이미지/동영상/압축/코드/캘리브레이션 등)
+_SKIP_EXT = {
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff",
+    ".mp4", ".avi", ".mov", ".mkv",
+    ".tgz", ".gz", ".zip", ".tar", ".7z", ".rar", ".bz2", ".xz",
+    ".py", ".pyc", ".pyo", ".ipynb", ".so", ".dll", ".exe", ".bin",
+    ".fits", ".fit", ".npy", ".npz", ".pdf", ".hwp", ".doc", ".docx",
+    ".xls", ".xlsx", ".cal",
+}
 
 
-def _detect_cams(date_str: str, site_name: str) -> List[str]:
-    obs_dir = OBS_ROOT / date_str / site_name
-    if not obs_dir.exists():
-        return []
-    candidates = [str(i) for i in range(1, 8)] + [str(i) for i in range(101, 112)]
-    return [c for c in candidates
-            if (obs_dir / _raw_filename(site_name, date_str, c)).exists()]
+def _looks_like_ftp(path: Path, max_bytes: int = 262144) -> bool:
+    """
+    파일 앞부분에 'FF_*.fits' streak 블록 마커가 있으면 raw FTP 로 판단.
+    이름/확장자와 무관하게 내용만으로 판정한다 (사이트마다 명명 규칙이 달라도 동작).
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(max_bytes)
+    except OSError:
+        return False
+    for line in head.splitlines():
+        s = line.strip()
+        if s.startswith("FF_") and s.endswith(".fits"):
+            return True
+    return False
+
+
+def _detect_ftp_files(folder: Path) -> List[Path]:
+    """
+    현재 폴더에서 raw FTP 파일(들)을 이름과 무관하게 내용으로 감지.
+    (cam1.txt, AQ0101_..._FTP.txt 등 어떤 이름이든 FTP 형식이면 잡힌다.)
+    """
+    found = []
+    for p in sorted(folder.iterdir()):
+        if not p.is_file():
+            continue
+        if p.name in _EXCLUDE_NAMES or p.suffix.lower() in _SKIP_EXT:
+            continue
+        if _looks_like_ftp(p):
+            found.append(p)
+    return found
 
 
 # =============================================================================
@@ -254,11 +307,15 @@ def _streak_to_lines(block_lines: List[str]) -> Optional[List[str]]:
     try:
         speed, pa = _compute_motion(t_center_sec, ra_fn, dec_fn)
     except Exception:
+
+
+
         return None
 
     streak_id = str(df["name"].iloc[0])
 
     def _fmt_time(ts):
+
         return pd.Timestamp(ts).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
 
     header = (
@@ -279,78 +336,73 @@ def _streak_to_lines(block_lines: List[str]) -> Optional[List[str]]:
 
 
 # =============================================================================
-# 한 cam 처리
-# =============================================================================
-def _process_one_cam(date_str: str, site_name: str, cam: str):
-    raw_path = OBS_ROOT / date_str / site_name / _raw_filename(site_name, date_str, cam)
-    if not raw_path.exists():
-        return 0, []
-
-    blocks = _split_ftp_into_blocks(str(raw_path))[4:]  # 헤더 4블록 제외
-    out_blocks = []
-    for block in blocks:
-        lines = _streak_to_lines(block)
-        if lines is not None:
-            out_blocks.append(lines)
-    return len(blocks), out_blocks
-
-
-# =============================================================================
 # 공개 API
 # =============================================================================
-def run(date_str: str, site, cams: Optional[List[str]] = None) -> Path:
+def run(in_path=None, out_path=OUT_FILE) -> Path:
     """
-    한 (date, site) 의 모든 cam FTP → 단일 _str.txt 생성.
+    현재 폴더의 raw FTP 자료 → ./str.txt 생성.
 
     Parameters
     ----------
-    date_str : "YYYYMMDD"
-    site     : Site (classes.sites.Site) 또는 site.name 만 있어도 OK
-    cams     : 없으면 OBS_ROOT 에서 자동 감지
+    in_path  : 처리할 FTP 파일을 직접 지정 (단일). None 이면:
+                 ./ftp.txt 가 있으면 그것만, 없으면 raw FTP *.txt 자동 감지(통합).
+    out_path : 출력 streak 파일 (기본 ./str.txt)
 
     Returns
     -------
-    Path  : 생성된 _str.txt 경로
+    Path : 생성된 str.txt 경로
     """
-    site_name = site.name if hasattr(site, "name") else str(site)
-    if not cams:
-        cams = _detect_cams(date_str, site_name)
-    if not cams:
+    out_path = Path(out_path)
+    folder = Path.cwd()
+
+    if in_path is not None:
+        in_files = [Path(in_path)]
+        for f in in_files:
+            if not f.exists():
+                raise FileNotFoundError(f"입력 파일이 현재 폴더에 없습니다: {f.resolve()}")
+    elif IN_FILE.exists():
+        in_files = [IN_FILE]
+    else:
+        in_files = _detect_ftp_files(folder)
+
+    if not in_files:
         raise FileNotFoundError(
-            f"No FTP files under {OBS_ROOT / date_str / site_name}"
+            f"입력 FTP 파일을 현재 폴더에서 찾지 못했습니다: {folder}\n"
+            f"  → '{IN_FILE.name}' 가 있거나, 'FF_*.fits' 블록을 가진 *.txt 가 있어야 합니다."
         )
 
-    out_dir = OUT_ROOT / date_str / site_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{date_str}_{site_name}_str.txt"
-
     print()
-    print("=== Step 1: make_str ===")
-    print(f"  date       : {date_str}")
-    print(f"  site       : {site_name}")
-    print(f"  cams       : {cams}")
-    print(f"  pre-filter : duration >= {MIN_DURATION_S}s AND n_obs >= {MIN_N_OBS}")
+    print("=== ftp2str ===")
+    print(f"  input      : {', '.join(p.name for p in in_files)}")
     print(f"  output     : {out_path}")
+    print(f"  pre-filter : duration >= {MIN_DURATION_S}s AND n_obs >= {MIN_N_OBS}")
 
-    g_total = g_written = 0
     t_start = time.time()
-
+    g_total = g_written = 0
     with open(out_path, "w", encoding="utf-8") as fout:
-        for cam in cams:
-            t_c = time.time()
-            n_total, out_blocks = _process_one_cam(date_str, site_name, cam)
-            n_written = len(out_blocks)
-            for lines in out_blocks:
+        for f in in_files:
+            blocks = _split_ftp_into_blocks(str(f))[N_HEADER_BLOCKS:]
+            n_total = len(blocks)
+            n_written = 0
+            for block in blocks:
+                lines = _streak_to_lines(block)
+                if lines is None:
+                    continue
                 for ln in lines:
                     fout.write(ln + "\n")
                 fout.write(STREAK_SEP + "\n")
+                n_written += 1
             g_total += n_total
             g_written += n_written
-            pct = (n_written / n_total * 100.0) if n_total else 0.0
-            print(f"  [cam{cam}] {n_written}/{n_total} kept ({pct:.1f}%)  "
-                  f"{time.time()-t_c:.1f}s")
+            if len(in_files) > 1:
+                pct = (n_written / n_total * 100.0) if n_total else 0.0
+                print(f"  [{f.name}] {n_written}/{n_total} kept ({pct:.1f}%)")
 
-    overall = (g_written / g_total * 100.0) if g_total else 0.0
-    print(f"  TOTAL      : {g_written}/{g_total} kept ({overall:.1f}%)  "
+    pct = (g_written / g_total * 100.0) if g_total else 0.0
+    print(f"  TOTAL      : {g_written}/{g_total} kept ({pct:.1f}%)  "
           f"in {time.time()-t_start:.1f}s")
     return out_path
+
+
+if __name__ == "__main__":
+    run()
