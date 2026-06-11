@@ -34,6 +34,7 @@ simulated data, derived TLE 등 임의의 경우에도 동일하게 사용하기
                 → N = 2K+1 (홀수). center 가 grid 정중앙 row.
   - RA/Dec (sample) : raw 관측점에 LS 1차 fit 후 grid 시각에서 평가
   - MeanIntensity   : raw 관측점 중 [t-0.5s, t+0.5s) 안에 있는 inten 의 평균
+                      (창이 비면 = 검출 공백, 시간상 가장 가까운 raw inten 으로 채움)
 
 한 폴더에 여러 카메라 raw FTP 가 같이 있으면 자동 감지 시 모두 통합한다.
 (ftp.txt 가 명시돼 있으면 그 1개만 처리.)
@@ -266,9 +267,15 @@ def _compute_motion(t_center_sec: float, ra_fn, dec_fn):
 def _mean_intensity_window(times_sec: np.ndarray, inten: np.ndarray,
                             t_sec: float) -> float:
     m = (times_sec >= t_sec - 0.5) & (times_sec < t_sec + 0.5) & np.isfinite(inten)
-    if not m.any():
+    if m.any():
+        return float(np.mean(inten[m]))
+
+    # 창에 raw 점이 없으면(검출 공백) 가장 가까운 finite raw 점으로 채움
+    fin = np.isfinite(times_sec) & np.isfinite(inten)
+    if not fin.any():
         return float("nan")
-    return float(np.mean(inten[m]))
+    idx = np.argmin(np.abs(times_sec[fin] - t_sec))
+    return float(inten[fin][idx])
 
 
 # =============================================================================
